@@ -1,4 +1,4 @@
-import os, re, time, hashlib, secrets, sqlite3, subprocess, threading, shutil, sys, signal
+import os, re, time, hashlib, secrets, sqlite3, subprocess, threading, shutil, sys, signal, zipfile, io
 from contextlib import contextmanager
 from datetime import timedelta
 from flask import Flask, request, jsonify, redirect, url_for, render_template, Response
@@ -118,6 +118,7 @@ TEMPLATES = {
       <span id="status" class="muted">🟡</span>
       <a href="/project/{{ project_id }}/terminal" class="btn btn-sec" target="_blank">📟 Terminal</a>
       <a href="/project/{{ project_id }}/preview" class="btn btn-sec" target="_blank">🌐 Preview</a>
+      <a href="/api/projects/{{ project_id }}/download" class="btn btn-sec" style="color:#00ff00; border-color:#00ff00" target="_blank">⬇ ZIP</a>
       <button class="btn btn-pri" id="run-btn">▶ Run</button>
       <button class="btn btn-sec" id="panel-btn">💬</button>
     </div>
@@ -1313,6 +1314,32 @@ def api_chat(pid):
         mid = c.execute('INSERT INTO messages (project_id, user_id, username, text, created) VALUES (?,?,?,?,?)',
                         (pid, current_user.id, current_user.username, text, time.time())).lastrowid
     return jsonify(id=mid, username=current_user.username, text=text)
+
+# ============================================================
+# API: ZIP DOWNLOAD
+# ============================================================
+@app.route('/api/projects/<int:pid>/download')
+@login_required
+def api_download_project(pid):
+    p = get_project(pid)
+    if not p:
+        return 'Topilmadi', 404
+
+    files = query('SELECT name, content FROM files WHERE project_id=?', (pid,))
+    
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.writestr(f['name'], f['content'] or '')
+    
+    memory_file.seek(0)
+    
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', p['name'])
+    return Response(
+        memory_file.getvalue(),
+        mimetype='application/zip',
+        headers={'Content-Disposition': f'attachment; filename={safe_name}.zip'}
+    )
 
 # ============================================================
 # API: TERMINAL & PROCESS MANAGEMENT
