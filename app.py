@@ -1,4 +1,4 @@
-import os, re, time, hashlib, secrets, sqlite3, subprocess, threading, shutil, sys, signal, zipfile, io
+import os, re, time, hashlib, secrets, sqlite3, subprocess, threading, shutil, sys, signal, zipfile, io, requests
 from contextlib import contextmanager
 from datetime import timedelta
 from flask import Flask, request, jsonify, redirect, url_for, render_template, Response
@@ -253,7 +253,7 @@ TEMPLATES = {
       <b class="logo" style="color:#00ff00">🌐 Veb-Server Preview</b>
     </div>
     <div class="bar-r">
-      <input type="text" id="url-input" class="input" value="http://127.0.0.1:5001" style="width:220px; padding:4px 8px;" placeholder="http://127.0.0.1:5001">
+      <input type="text" id="url-input" class="input" value="/api/projects/{{ project_id }}/proxy/?port=5001" style="width:300px; padding:4px 8px;" placeholder="/api/projects/{{ project_id }}/proxy/?port=5001">
       <button class="btn btn-pri" onclick="loadPreview()">Ochish</button>
       <button class="btn btn-sec" onclick="document.getElementById('preview-iframe').src = document.getElementById('preview-iframe').src;">⟳ Yangilash</button>
       <button class="btn btn-danger" onclick="stopServer()">⏹ Serverni To'xtatish</button>
@@ -262,9 +262,9 @@ TEMPLATES = {
   <div style="flex:1; background:#fff; display:flex; flex-direction:column; position:relative;">
     <iframe id="preview-iframe" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups" style="flex:1; width:100%; border:none; display:none;"></iframe>
     <div id="empty-msg" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#666; font-family:sans-serif; text-align:center; padding:20px;">
-      <h2 style="margin-bottom:10px;">Veb-server Preview</h2>
+      <h2 style="margin-bottom:10px;">Veb-server Preview (Real Server)</h2>
       <p>Kodingizda <code>app.run(port=5001)</code> kabi portni ishga tushiring.</p>
-      <p>So'ngra yuqoridagi maydonga to'liq URL manzilni yozib "Ochish" tugmasini bosing.</p>
+      <p>So'ngra yuqoridagi maydonda portni o'zgartirib "Ochish" tugmasini bosing.</p>
     </div>
   </div>
 </div>
@@ -273,10 +273,6 @@ TEMPLATES = {
     var url = document.getElementById('url-input').value.trim();
     var iframe = document.getElementById('preview-iframe');
     var emptyMsg = document.getElementById('empty-msg');
-    
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        url = 'http://' + url;
-    }
     
     if (url) {
       iframe.src = url;
@@ -1342,6 +1338,66 @@ def api_download_project(pid):
     )
 
 # ============================================================
+# API: PROXY (Real Server Preview)
+# ============================================================
+@app.route('/api/projects/<int:pid>/proxy/', defaults={'path': ''})
+@app.route('/api/projects/<int:pid>/proxy/<path:path>')
+@login_required
+def api_proxy(pid, path):
+    if not get_project(pid):
+        return 'Topilmadi', 404
+        
+    port = request.args.get('port', '5001')
+    target_url = f"http://127.0.0.1:{port}/{path}"
+    
+    query_params = request.args.to_dict()
+    query_params.pop('port', None)
+    
+    try:
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            data=request.get_data(),
+            params=query_params,
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=5
+        )
+        
+        content = resp.content
+        ctype = resp.headers.get('Content-Type', '')
+        
+        # HTML ga <base> tegini qo'shish (CSS/JS rasmlar to'g'ri yuklanishi uchun)
+        if 'text/html' in ctype:
+            try:
+                html = content.decode('utf-8')
+                base_tag = f'<base href="/api/projects/{pid}/proxy/?port={port}&">'
+                if '<head>' in html:
+                    html = html.replace('<head>', f'<head>{base_tag}', 1)
+                else:
+                    html = base_tag + html
+                content = html.encode('utf-8')
+            except:
+                pass
+        
+        # Redirectlarni proxydan o'tkazish
+        if resp.status_code in (301, 302, 303, 307, 308) and 'Location' in resp.headers:
+            loc = resp.headers['Location']
+            if loc.startswith('/'):
+                resp.headers['Location'] = f"/api/projects/{pid}/proxy{loc}?port={port}"
+        
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers_out = [(name, value) for name, value in resp.headers.items() if name.lower() not in excluded_headers]
+        
+        return Response(content, resp.status_code, headers_out)
+    except requests.exceptions.ConnectionError:
+        return '<div style="color:#fff;background:#333;padding:20px;font-family:sans-serif;"><h2>Server ishlamayapti</h2><p>Iltimos, avval kodingizni ishga tushiring (Run) va portni to\'g\'ri kiriting.</p></div>', 502
+    except Exception as e:
+        return f"Proxy xatosi: {str(e)}", 500
+
+# ============================================================
 # API: TERMINAL & PROCESS MANAGEMENT
 # ============================================================
 def kill_process_tree(process):
@@ -1444,7 +1500,7 @@ def api_term_stop(pid):
     return jsonify(ok=True)
 
 # ============================================================
-# API: PREVIEW
+# API: PREVIEW (HTML/CSS)
 # ============================================================
 @app.route('/api/projects/<int:pid>/preview/<path:filename>')
 @login_required
