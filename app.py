@@ -1,7 +1,7 @@
 import os, re, time, hashlib, secrets, sqlite3, subprocess, threading, shutil, sys, signal, zipfile, io, requests
 from contextlib import contextmanager
 from datetime import timedelta
-from flask import Flask, request, jsonify, redirect, url_for, render_template, Response
+from flask import Flask, request, jsonify, redirect, url_for, render_template, Response, send_from_directory
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from jinja2 import DictLoader
@@ -14,19 +14,38 @@ os.makedirs(SANDBOX, exist_ok=True)
 active_runs = {}
 
 # ============================================================
-# HTML SHABLONLAR
+# HTML SHABLONLAR (PWA qo'shilgan)
 # ============================================================
 TEMPLATES = {
 'base.html': r'''<!DOCTYPE html>
 <html lang="uz"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}CodeSync{% endblock %}</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+
+<!-- PWA va Ikonkalar -->
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="theme-color" content="#1e1e1e">
+<link rel="icon" href="/icon.png" type="image/png">
+
 <link rel="stylesheet" href="/app.css">
 {% block head %}{% endblock %}
 </head><body>
 {% block body %}{% endblock %}
 {% block scripts %}{% endblock %}
+
+<!-- Service Worker ro'yxatdan o'tkazish -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('/service-worker.js').then(function(reg) {
+        console.log('ServiceWorker registered', reg.scope);
+      }).catch(function(err) {
+        console.log('ServiceWorker registration failed', err);
+      });
+    });
+  }
+</script>
 </body></html>''',
 
 'landing.html': r'''{% extends "base.html" %}
@@ -1171,6 +1190,57 @@ def editor_js():
     return asset(EDITOR_JS, 'application/javascript')
 
 # ============================================================
+# PWA MARSHRUTLARI (Manifest, Service Worker, Icon)
+# ============================================================
+@app.route('/manifest.json')
+def manifest():
+    data = {
+        "name": "CodeSync IDE",
+        "short_name": "CodeSync",
+        "description": "Brauzerdagi jamoaviy kod muharriri",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1e1e1e",
+        "theme_color": "#0e7fd0",
+        "icons": [
+            {
+                "src": "/icon.png",
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "/icon.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }
+    return jsonify(data)
+
+@app.route('/service-worker.js')
+def service_worker():
+    js = """
+    self.addEventListener('install', (e) => {
+      self.skipWaiting();
+    });
+    self.addEventListener('fetch', (e) => {
+      // Tarmoq so'rovlarini o'zgartirmasdan o'tkazib yuborish
+      e.respondWith(fetch(e.request).catch(() => new Response("Oflayn rejimda ishlamaydi")));
+    });
+    """
+    return Response(js, mimetype='application/javascript')
+
+@app.route('/icon.png')
+def serve_icon():
+    # Bu fayl app.py bilan bir papkada turishi shart
+    icon_path = os.path.join(BASE, 'icon.png')
+    if not os.path.exists(icon_path):
+        # Agar rasm bo'lmasa, oddiy SVG qaytaramiz (o'rnatish tugmasi chiqishi uchun)
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">⚡</text></svg>'''
+        return Response(svg, mimetype='image/svg+xml')
+    return send_from_directory(BASE, 'icon.png')
+
+# ============================================================
 # API: LOYIHALAR
 # ============================================================
 @app.route('/api/projects', methods=['GET', 'POST'])
@@ -1369,7 +1439,6 @@ def api_proxy(pid, path):
         content = resp.content
         ctype = resp.headers.get('Content-Type', '')
         
-        # HTML ga <base> tegini qo'shish (CSS/JS rasmlar to'g'ri yuklanishi uchun)
         if 'text/html' in ctype:
             try:
                 html = content.decode('utf-8')
@@ -1382,7 +1451,6 @@ def api_proxy(pid, path):
             except:
                 pass
         
-        # Redirectlarni proxydan o'tkazish
         if resp.status_code in (301, 302, 303, 307, 308) and 'Location' in resp.headers:
             loc = resp.headers['Location']
             if loc.startswith('/'):
