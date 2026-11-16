@@ -1,0 +1,7 @@
+codesync.db
+codesync.db-wal
+codesync.db-shm
+.secret_key
+sandbox/
+uploads/
+__pycache__/
